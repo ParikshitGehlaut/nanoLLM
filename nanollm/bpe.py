@@ -1,7 +1,8 @@
 from typing import Any
+import regex as re
+import pickle
 
-def get_pair(ids):
-    counts = {}
+def get_pair(ids, counts):
     for pair in zip(ids, ids[1:]):
         counts[pair] = counts.get(pair, 0) + 1
     return counts
@@ -23,12 +24,14 @@ def merge(ids, pair, index):
 
     return new_ids
 
-class BasicTokenizer:
+class RegexTokenizer:
     def __init__(self, vocab_size, verbose=False):
         self.vocab_size = vocab_size
         self.vocabulary = {i : bytes([i]) for i in range(256)}
         self.merges = {}
         self.verbose = verbose
+        self.pattern = re.compile(
+        r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+""")
 
     def train(self, text):
         # Encode the text
@@ -41,37 +44,36 @@ class BasicTokenizer:
         assert self.vocab_size >= 256, "vocab size must be at least 256"
         number_merges = self.vocab_size - 256
 
-        byte_strings = text.encode('utf-8')
-        ids = list[Any](byte_strings)
-
-        length_initial = len(ids)
+        text_chunks = re.findall(self.pattern, text)
+        encoded_chunks = [list(text_chunk.encode('utf-8')) for text_chunk in text_chunks]
 
         for i in range(number_merges):
-            pairs = get_pair(ids)
+            pairs = {}
+            for encoded_chunk in encoded_chunks:
+                get_pair(encoded_chunk, pairs)
             pair = max(pairs, key=pairs.get)
             index = 256 + i
-            ids = merge(ids, pair, index)
+            encoded_chunks = [merge(encoded_chunk, pair, index) for encoded_chunk in encoded_chunks]
             self.merges[pair] = index
             self.vocabulary[index] = self.vocabulary[pair[0]] + self.vocabulary[pair[1]]
 
-        if self.verbose:
-            length_final = len(ids) 
-            compression = length_initial / length_final
-
-            print(length_final, length_initial)
-            print(compression)
-            print(ids)
-
-        # print(sorted([(v, k) for k, v in pairs.items()], reverse=True)[:10])
-
     def encode(self, text):
+        text_chunks = re.findall(self.pattern, text)
+        encoded_text = []
+
+        for text_chunk in text_chunks:
+            encoded_chunk = self._encode_chunk(text_chunk)
+            encoded_text.extend(encoded_chunk)
+
+        return encoded_text
+        
+    def _encode_chunk(self, text):
         """
         self.merges is important here
         we get text, then we convert that text to byte strings and then to integers
         """
-        # Step 1: raw bytes → list of ints
-        ids = list(text.encode('utf-8'))
-    
+        ids = list[Any](text.encode('utf-8'))
+
         # Step 2: apply merges in training order
         for pair, index in self.merges.items():
             ids = merge(ids, pair, index)
@@ -90,18 +92,36 @@ class BasicTokenizer:
         
         # step 3 : decode the final bytes as 'utf-8'
         return token_bytes.decode('utf-8')
+    
+    def save(self, path):
+        with open(path, "wb") as f:
+            pickle.dump({
+                "merges": self.merges,
+                "vocabulary": self.vocabulary,
+                "pattern" : self.pattern.pattern,
+            }, f)
 
+    @classmethod
+    def load(cls, path):
+        tokenizer = cls.__new__(cls) 
 
-tokenizer = BasicTokenizer(266, False)
-text = """The very name strikes fear and awe into the hearts of programmers worldwide. We all know we ought to "support
-Unicode" in our software (whatever that means-like using wchar_t for all the strings, right?). But Unicode can be abstruse, and diving into the thousand-page Unicode Standard plus its dozens of supplementary annexes, reports,"""
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+            tokenizer.merges = data["merges"]
+            tokenizer.vocabulary = data["vocabulary"]
+            tokenizer.pattern = re.compile(data["pattern"])
+
+        return tokenizer
+
+tokenizer = RegexTokenizer(258, False)
+text = """low low"""
 tokenizer.train(text)
 
-encoded_txt = tokenizer.encode("My name is Parikshit.")
-decoded_txt = tokenizer.decode(encoded_txt)
+# encoded_txt = tokenizer.encode("My name is Parikshit.")
+# decoded_txt = tokenizer.decode(encoded_txt)
 
-print(encoded_txt)
-print(decoded_txt)
+# print(encoded_txt)
+# print(decoded_txt)
 
-print(tokenizer.encode('are hello'))
-print(list[int]('are hello'.encode('utf-8')))
+# print(tokenizer.encode('are hello'))
+# print(list[int]('are hello'.encode('utf-8')))
