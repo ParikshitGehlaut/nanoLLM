@@ -34,6 +34,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(model_args.dim, model_args.dim)
         # Regularization
         self.n_heads = model_args.n_heads
+        self.NANOLLM_SCALE_INIT = 1 # For residual connections, scale the initialization of the weights by 1/sqrt(2 * n_layers)
         self.dim = model_args.dim
         self.head_dim = self.dim // self.n_heads
 
@@ -70,6 +71,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(model_args.dim, 4 * model_args.dim)
         self.c_proj = nn.Linear(4 * model_args.dim, model_args.dim)
         self.act = nn.GELU()
+        self.NANOLLM_SCALE_INIT = 1 # For residual connections, scale the initialization of the weights by 1/sqrt(2 * n_layers)
 
     def forward(self, x):
         x = self.c_fc(x) # [batch_size, seq_len, 4 * dim]
@@ -106,6 +108,24 @@ class GPT(nn.Module):
         ))
 
         self.lm_head = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+
+        # Weight Sharing Scheme: The embedding weights and the output projection weights are shared.
+        # Shape of wte: [vocab_size, dim], shape of lm_head.weight: [vocab_size, dim], In PyTorch, weight.shape = [out_features, in_features] 
+        self.lm_head.weight = self.transformer.wte.weight
+
+        # init params
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOLLM_SCALE_INIT'):
+                std += (2 * self.model_args.n_layers) ** -0.5
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         # idx is shape : [batch_size, seq_len]
