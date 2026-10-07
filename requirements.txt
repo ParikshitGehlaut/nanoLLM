@@ -1,12 +1,13 @@
-filelock==3.25.2
-fsspec==2026.2.0
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.6.1
-packaging @ file:///opt/miniconda3/conda-bld/packaging_1761049079023/work
-setuptools==80.10.2
-sympy==1.14.0
-torch==2.10.0
-typing_extensions==4.15.0
-wheel==0.46.3
+# PyTorch with ROCm 7.0 for AMD Instinct MI300X
+--extra-index-url https://download.pytorch.org/whl/rocm7.0
+torch
+torchvision
+torchaudio
+
+# nanoLLM / nanoGPT dependencies
+regex
+tiktoken
+transformers
+datasets
+tqdm
+numpy
