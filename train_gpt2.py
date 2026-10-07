@@ -107,7 +107,7 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         # idx is shape : [batch_size, seq_len]
         batch_size, seq_len = idx.size()
         assert seq_len <= self.model_args.max_seq_len, f"Cannot forward sequence of length {seq_len}, block size is only {self.model_args.max_seq_len}"
@@ -123,15 +123,76 @@ class GPT(nn.Module):
 
         x = self.transformer.ln_f(x) # [batch_size, seq_len, dim]
         logits = self.lm_head(x) # [batch_size, seq_len, vocab_size]
-        
-        return logits 
+        loss = None 
+
+        if targets is not None:
+            # Logits are of shape [batch_size, seq_len, vocab_size], targets are of shape [batch_size, seq_len]
+            # logits [batch_size, seq_len, vocab_size] --> [batch_size * seq_len, vocab_size]
+            # targets [batch_size, seq_len] --> [batch_size * seq_len]
+            # ignore_index=-1 means that the loss will ignore the positions where the target is -1 (padding)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        return logits, loss
 
 # ---------------------------------------------------------------------------------------------------------------------------------------
 
+import tiktoken 
 
+# DataLoader
+class DataLoaderLite:
+    def __init__(self, batch_size, seq_len, device):
+        self.B = batch_size
+        self.T = seq_len
+        self.device = device
+
+        # At init load the entire dataset into memory
+        with open("input.txt", "r") as f:
+            text = f.read()
+        
+        enc = tiktoken.get_encoding("gpt2")
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"Loaded dataset with {len(self.tokens)} tokens")
+        print(f"Number of batches: {len(self.tokens) // (self.B * self.T)}")
+
+        # state
+        self.current_position = 0
+
+    def next_batch(self):
+        if self.current_position + self.B * self.T + 1 >= len(self.tokens):
+            # reset to start
+            self.current_position = 0
+
+        buf = self.tokens[self.current_position:self.current_position + self.B * self.T + 1]
+        x = buf[:-1].view(self.B, self.T).to(self.device) # [B, T]
+        y = buf[1:].view(self.B, self.T).to(self.device) # [B, T]
+
+        self.current_position += self.B * self.T
+
+        return x, y
+
+# ---------------------------------------------------------------------------------------------------------------------------------------
 model = GPT(GPTConfig())
-model.eval()
 model.to(device)
+
+train_loader = DataLoaderLite(batch_size=4, seq_len=32, device=device)
+
+# Optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+# Training loop
+for iter in range(1000):
+    x, y = train_loader.next_batch()
+
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+
+    if iter % 100 == 0:
+        print(f"Step {iter}, Loss: {loss.item()}")
+
+
+import sys; sys.exit(0)
 
 # Sampling loop
 import tiktoken
