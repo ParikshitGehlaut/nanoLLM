@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+import time
+
 # Device configuration
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -194,22 +196,38 @@ class DataLoaderLite:
 model = GPT(GPTConfig())
 model.to(device)
 
-train_loader = DataLoaderLite(batch_size=4, seq_len=32, device=device)
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
+
+train_loader = DataLoaderLite(batch_size=32, seq_len=1024, device=device)
+
+# Using TensorFloat32 (TF32)
+torch.set_float32_matmul_precision('high')
 
 # Optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
 # Training loop
-for iter in range(1000):
+for iter in range(100):
+    t0 = time.time()
     x, y = train_loader.next_batch()
 
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
+        
     loss.backward()
     optimizer.step()
+    torch.cuda.synchronize()
+    t1 = time.time()
+    dt = (t1 - t0) * 1000  # milliseconds
 
-    if iter % 100 == 0:
-        print(f"Step {iter}, Loss: {loss.item()}")
+    tokens_per_second = (train_loader.B * train_loader.T) / (t1 - t0)
+
+    if iter % 10 == 0:
+        print(f"Step {iter}, Loss: {loss.item()}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_second:.2f}")
 
 
 import sys; sys.exit(0)
