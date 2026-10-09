@@ -40,9 +40,6 @@ class CausalSelfAttention(nn.Module):
         self.dim = model_args.dim
         self.head_dim = self.dim // self.n_heads
 
-        # Causal mask to ensure that attention is only applied to the left in the input sequence
-        self.register_buffer("bias", torch.tril(torch.ones(model_args.max_seq_len, model_args.max_seq_len).view(1, 1, model_args.max_seq_len, model_args.max_seq_len))) # [1, 1, seq_len, seq_len]
-
     def forward(self, x):
         batch_size, seq_len, dim = x.size() # [batch_size, seq_len, dim]
 
@@ -53,12 +50,8 @@ class CausalSelfAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2) # [batch_size, n_heads, seq_len, head_dim]
         v = v.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2) # [batch_size, n_heads, seq_len, head_dim]
 
-        # Self Attention (materializes the large (seq_len, seq_len) matrix for all the queries and keys)
-        att = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5) # [batch_size, n_heads, seq_len, seq_len]
-        att = att.masked_fill(self.bias[:, :, :seq_len, :seq_len] == 0, float('-inf')) # [batch_size, n_heads, seq_len, seq_len]
-        att = F.softmax(att, dim=-1) # [batch_size, n_heads, seq_len, seq_len]
-        
-        y = att @ v # [batch_size, n_heads, seq_len, seq_len] @  [batch_size, n_heads, seq_len, head_dim] --> [batch_size, n_heads, seq_len, head_dim]
+        # Using Flash Attention via PyTorch SDPA
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # [batch_size, n_heads, seq_len, head_dim]
 
         y = y.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim) # [batch_size, seq_len, dim]
         y = self.c_proj(y) # [batch_size, seq_len, dim]
@@ -193,20 +186,21 @@ class DataLoaderLite:
         return x, y
 
 # ---------------------------------------------------------------------------------------------------------------------------------------
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
+model = torch.compile(model)
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(batch_size=32, seq_len=1024, device=device)
+train_loader = DataLoaderLite(batch_size=128, seq_len=1024, device=device)
 
 # Using TensorFloat32 (TF32)
 torch.set_float32_matmul_precision('high')
 
 # Optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps = 1e-8, weight_decay=0.1)
 
 # Training loop
 for iter in range(100):
@@ -217,8 +211,9 @@ for iter in range(100):
 
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
         logits, loss = model(x, y)
-        
+
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()
@@ -227,7 +222,7 @@ for iter in range(100):
     tokens_per_second = (train_loader.B * train_loader.T) / (t1 - t0)
 
     if iter % 10 == 0:
-        print(f"Step {iter}, Loss: {loss.item()}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_second:.2f}")
+        print(f"Step {iter}, Loss: {loss.item():.6f}, Norm: {norm.item():.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_second:.2f}")
 
 
 import sys; sys.exit(0)
