@@ -4,6 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 
 import time
+import math
 
 # Device configuration
 if torch.cuda.is_available():
@@ -148,6 +149,31 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         return logits, loss
 
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # Start with all of the candidate parameters (that requires grad)
+        param_dict = {name: param for name, param in self.named_parameters() if param.requires_grad}
+        # Create optimizer groups for weight decay and no weight decay
+        # Any parameters that is 2D (like matmuls + embeddings) will be weight decayed, all bias and LayerNorm weights will not be weight decayed
+        decay_params = [param for name, param in param_dict.items() if param.ndim >= 2]
+        no_decay_params = [param for name, param in param_dict.items() if param.ndim < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_no_decay_params = sum(p.numel() for p in no_decay_params)
+
+        print(f"num decayed parameter tensors: {len(decay_params)}, num decayed parameters: {num_decay_params}")
+        print(f"num non-decayed parameter tensors: {len(no_decay_params)}, num non-decayed parameters: {num_no_decay_params}")
+
+        # Using Fused Adam optimizer from PyTorch
+        use_fused = True if device.type == 'cuda' else False
+        print(f"Using Fused Adam: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
+
+
 # ---------------------------------------------------------------------------------------------------------------------------------------
 
 import tiktoken 
@@ -190,6 +216,25 @@ model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model = torch.compile(model)
 
+# Cosine Annealing Learning Rate Scheduler
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_iters = 10
+max_steps = 50
+
+def get_lr(it):
+    # 1. Linear warmup for the first warmup_iters steps
+    if it < warmup_iters:
+        return max_lr * (it + 1) / warmup_iters
+    # 2. If iter > lr_decay_iters, then return min_lr
+    if it > max_steps:
+        return min_lr
+    # 3. Cosine annealing from max_lr to min_lr
+    decay_ratio = (it - warmup_iters) / (max_steps - warmup_iters)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges from 1 to 0
+    return min_lr + coeff * (max_lr - min_lr)
+
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
@@ -200,10 +245,10 @@ train_loader = DataLoaderLite(batch_size=128, seq_len=1024, device=device)
 torch.set_float32_matmul_precision('high')
 
 # Optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps = 1e-8, weight_decay=0.1)
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=3e-4, device=device)
 
 # Training loop
-for iter in range(100):
+for iter in range(max_steps):
     t0 = time.time()
     x, y = train_loader.next_batch()
 
@@ -213,7 +258,12 @@ for iter in range(100):
         logits, loss = model(x, y)
 
     loss.backward()
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+    # Determine and set the learning rate for this iteration
+    lr = get_lr(iter)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()
@@ -221,14 +271,13 @@ for iter in range(100):
 
     tokens_per_second = (train_loader.B * train_loader.T) / (t1 - t0)
 
-    if iter % 10 == 0:
-        print(f"Step {iter}, Loss: {loss.item():.6f}, Norm: {norm.item():.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_second:.2f}")
+    if iter % 2 == 0:
+        print(f"Step {iter}, Loss: {loss.item():.6f}, Norm: {norm.item():.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_second:.2f}, LR: {lr:.6e}")
 
 
 import sys; sys.exit(0)
 
 # Sampling loop
-import tiktoken
 enc = tiktoken.get_encoding("gpt2")
 tokens = enc.encode("Hello, my name is")
 tokens = torch.tensor(tokens, dtype=torch.long)
