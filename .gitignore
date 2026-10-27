@@ -208,4 +208,9 @@ __marimo__/
 
 # Flux runner & logs
 run_flux.sh
+prepare_climbmix_flux.sh
+*_flux.sh
 flux-*.out
+
+# Local learning roadmap
+/plan/
