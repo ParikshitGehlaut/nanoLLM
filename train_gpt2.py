@@ -8,7 +8,6 @@ from torch.nn import functional as F
 
 import time
 import math
-import tiktoken
 
 # Distributed training libraries
 import os
@@ -269,7 +268,7 @@ if torch.cuda.is_available():
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_iters = 50
-max_steps = 1668
+max_steps = 1668 * 4 # 4 epochs of training on the dataset
 
 def get_lr(it):
     # 1. Linear warmup for the first warmup_iters steps
@@ -313,10 +312,19 @@ raw_model = model.module if ddp else model
 # Optimizer
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=min_lr, device=device)
 
+# Create a log directory for saving checkpoints and logs
+log_dir = 'logs'
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'training_log.txt')
+with open(log_file, 'w') as f:
+    pass # just create an empty log file
+
+
 for iter in range(max_steps):
     # Training step
     model.train()
     t0 = time.time()
+    last_step = iter == max_steps - 1
     optimizer.zero_grad()
     loss_accum = 0.0
     # Doing gradient accumulation across grad_accum_steps micro batches
@@ -349,10 +357,24 @@ for iter in range(max_steps):
     tokens_per_second = tokens_processed / (t1 - t0)
 
     if master_process and (iter < 10 or iter % 10 == 0):
-        print(f"Step {iter}, Loss: {loss_accum.item():.6f}, Norm: {norm.item():.4f}, Time: {dt:.2f} ms, Tokens/sec: {tokens_per_second:.2f}, LR: {lr:.6e}")
+        with open(log_file, 'a') as f:
+            f.write(f"Step {iter}| Loss: {loss_accum.item():.6f}| Norm: {norm.item():.4f}| Time: {dt:.2f} ms| Tokens/sec: {tokens_per_second:.2f}| LR: {lr:.6e}\n")
 
-    # Validation step every 100 iterations
-    if iter % 100 == 0:
+        if iter > 0 and iter % 5000 == 0 or last_step:
+            # Save a checkpoint every 5000 iterations
+            checkpoint_path = os.path.join(log_dir, f"checkpoint_iter_{iter}.pt")
+            checkpoint = {
+                'model_state_dict': raw_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'iter': iter,
+                'loss': loss_accum.item(),
+            }
+            torch.save(checkpoint, checkpoint_path)
+            with open(log_file, 'a') as f:
+                f.write(f"Saved checkpoint to {checkpoint_path}\n")
+
+    # Validation step every 250 iterations
+    if iter % 250 == 0 or last_step:
         model.eval()
         val_loader.reset() # reset the validation loader to start from the beginning
 
@@ -368,7 +390,10 @@ for iter in range(max_steps):
         if ddp:
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG) # average the validation loss across all GPUs
         if master_process:
-            print(f"Validation Loss: {val_loss_accum.item():.6f}")
+            with open(log_file, 'a') as f:
+                f.write(f"Validation Loss: {val_loss_accum.item():.6f}\n")
+
+    
 
 
 if ddp:

@@ -211,6 +211,12 @@ run_flux.sh
 prepare_climbmix_flux.sh
 *_flux.sh
 flux-*.out
+*.log
+logs/
+*.pt
+
+# Plotting scripts
+plot_loss.py
 
 # Local learning roadmap
 /plan/
